@@ -1,9 +1,11 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <fstream>
 #include <chrono>
-#include <cstdint>
+#include <thread>
+#include <fstream>
+#include <algorithm>
+#include <iomanip>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -12,184 +14,182 @@
 #include "stb_image_write.h"
 
 using byte = uint8_t;
+const int BLUR_RADIUS = 15; 
 
-std::string removeExtension(const std::string& filename) {
-    size_t lastdot = filename.find_last_of(".");
-    if (lastdot == std::string::npos) return filename;
-    return filename.substr(0, lastdot);
-}
+struct Pixel {
+    byte r, g, b;
+    bool operator==(const Pixel& other) const {
+        return r == other.r && g == other.g && b == other.b;
+    }
+};
 
 struct Image {
     int width;
     int height;
-    std::vector<byte> pixels;
+    std::vector<Pixel> pixels;
 };
 
-class ImageProcessor {
+class ImageIO {
 public:
-    static Image loadImage(const std::string& filename) {
-        int w, h, channels;
-        unsigned char* data = stbi_load(filename.c_str(), &w, &h, &channels, 3);
-        
-        if (!data) {
-            const char* reason = stbi_failure_reason();
-            std::string msg = "BŁĄD STB: [" + std::string(reason) + "] plik: " + filename;
-            throw std::runtime_error(msg);
+    static Image load(const std::string& filename) {
+        int w, h, c;
+        unsigned char* data = stbi_load(filename.c_str(), &w, &h, &c, 3);
+        if (!data) throw std::runtime_error("Cannot load image");
+        Image img{w, h};
+        img.pixels.resize(w * h);
+        for (size_t i = 0; i < w * h; ++i) {
+            img.pixels[i] = {data[i * 3], data[i * 3 + 1], data[i * 3 + 2]};
         }
-
-        Image img;
-        img.width = w;
-        img.height = h;
-        img.pixels.assign(data, data + (w * h * 3));
-
         stbi_image_free(data);
-        std::cout << "[LOAD] Wczytano: " << filename << " (" << w << "x" << h << ")\n";
         return img;
     }
 
-    static void saveToPPM(const Image& img, const std::string& filename) {
-        std::ofstream file(filename, std::ios::binary);
-        if (!file.is_open()) return;
-
-        file << "P6\n" << img.width << " " << img.height << "\n255\n";
-        file.write(reinterpret_cast<const char*>(img.pixels.data()), img.pixels.size());
-        
-        std::cout << "[PPM] Zapisano obraz: " << filename << "\n";
-    }
-    
-    static void saveRLE(const std::string& filename, int width, int height, const std::vector<byte>& compressedData) {
-        std::ofstream file(filename, std::ios::binary);
-        if (!file.is_open()) throw std::runtime_error("Nie mozna zapisac pliku RLE");
-        
-        file.write(reinterpret_cast<const char*>(&width), sizeof(width));
-        file.write(reinterpret_cast<const char*>(&height), sizeof(height));
-        file.write(reinterpret_cast<const char*>(compressedData.data()), compressedData.size());
-        std::cout << "[RLE] Zapisano wynik: " << filename << "\n";
-    }
-
-    static bool loadRLE(const std::string& filename, int& width, int& height, std::vector<byte>& data) {
-        std::ifstream file(filename, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) return false;
-
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
-
-        if (size < 8) return false;
-
-        file.read(reinterpret_cast<char*>(&width), sizeof(width));
-        file.read(reinterpret_cast<char*>(&height), sizeof(height));
-
-        std::streamsize dataSize = size - sizeof(int) * 2;
-        data.resize(dataSize);
-        file.read(reinterpret_cast<char*>(data.data()), dataSize);
-        
-        return true;
+    static void save(const std::string& filename, const Image& img) {
+        std::vector<byte> raw;
+        raw.reserve(img.width * img.height * 3);
+        for (const auto& p : img.pixels) {
+            raw.push_back(p.r);
+            raw.push_back(p.g);
+            raw.push_back(p.b);
+        }
+        stbi_write_png(filename.c_str(), img.width, img.height, 3, raw.data(), img.width * 3);
     }
 };
 
-class RLECodec {
+class Processor {
+    static void blurRegion(const Image& src, Image& dst, int startY, int endY) {
+        int w = src.width;
+        int h = src.height;
+        for (int y = startY; y < endY; ++y) {
+            for (int x = 0; x < w; ++x) {
+                long r = 0, g = 0, b = 0;
+                int count = 0;
+                for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
+                    for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
+                        int ny = std::clamp(y + ky, 0, h - 1);
+                        int nx = std::clamp(x + kx, 0, w - 1);
+                        const Pixel& p = src.pixels[ny * w + nx];
+                        r += p.r; g += p.g; b += p.b;
+                        count++;
+                    }
+                }
+                dst.pixels[y * w + x] = {(byte)(r/count), (byte)(g/count), (byte)(b/count)};
+            }
+        }
+    }
+
+public:
+    static void applyBlur(const Image& src, Image& dst, int threads) {
+        dst = src;
+        std::vector<std::thread> pool;
+        int rows = src.height / threads;
+        for (int i = 0; i < threads; ++i) {
+            pool.emplace_back([&, i]() {
+                blurRegion(src, dst, i * rows, (i == threads - 1) ? src.height : (i + 1) * rows);
+            });
+        }
+        for (auto& t : pool) t.join();
+    }
+};
+
+class RLE {
 public:
     static std::vector<byte> compress(const Image& img) {
-        std::vector<byte> output;
-        output.reserve(img.pixels.size() / 2);
-
-        for (int y = 0; y < img.height; y++) {
-            const byte* row = &img.pixels[y * img.width * 3];
-            int x = 0;
-            while (x < img.width) {
-                byte r = row[x*3];
-                byte g = row[x*3+1];
-                byte b = row[x*3+2];
-                byte count = 1;
-
-                while ((x + count) < img.width && count < 255) {
-                    int next = (x + count) * 3;
-                    if (row[next] == r && row[next+1] == g && row[next+2] == b) count++;
-                    else break;
-                }
-                output.push_back(count);
-                output.push_back(r);
-                output.push_back(g);
-                output.push_back(b);
-                x += count;
-            }
+        std::vector<byte> out;
+        out.reserve(img.pixels.size() * 2);
+        size_t n = img.pixels.size();
+        size_t i = 0;
+        while (i < n) {
+            Pixel p = img.pixels[i];
+            byte count = 1;
+            while (i + count < n && count < 255 && img.pixels[i + count] == p) count++;
+            out.push_back(count);
+            out.push_back(p.r); out.push_back(p.g); out.push_back(p.b);
+            i += count;
         }
-        return output;
+        return out;
     }
 
-    static Image decompress(const std::vector<byte>& rleData, int width, int height) {
-        Image img;
-        img.width = width;
-        img.height = height;
-        img.pixels.reserve(width * height * 3);
-
-        size_t idx = 0;
-        size_t n = rleData.size();
-
-        while (idx < n) {
-            if (idx + 4 > n) break;
-
-            byte count = rleData[idx++];
-            byte r = rleData[idx++];
-            byte g = rleData[idx++];
-            byte b = rleData[idx++];
-
-            for (int i = 0; i < count; i++) {
-                img.pixels.push_back(r);
-                img.pixels.push_back(g);
-                img.pixels.push_back(b);
-            }
+    static Image decompress(const std::vector<byte>& data, int w, int h) {
+        Image img{w, h};
+        img.pixels.reserve(w * h);
+        size_t i = 0;
+        while (i < data.size()) {
+            byte count = data[i++];
+            Pixel p = {data[i++], data[i++], data[i++]};
+            for (int k = 0; k < count; ++k) img.pixels.push_back(p);
         }
         return img;
+    }
+
+    static void saveToFile(const std::string& fname, int w, int h, const std::vector<byte>& data) {
+        std::ofstream f(fname, std::ios::binary);
+        f.write((char*)&w, sizeof(w));
+        f.write((char*)&h, sizeof(h));
+        f.write((char*)data.data(), data.size());
+    }
+
+    static std::vector<byte> loadFromFile(const std::string& fname, int& w, int& h) {
+        std::ifstream f(fname, std::ios::binary | std::ios::ate);
+        size_t sz = f.tellg();
+        f.seekg(0);
+        f.read((char*)&w, sizeof(w));
+        f.read((char*)&h, sizeof(h));
+        std::vector<byte> data(sz - 8);
+        f.read((char*)data.data(), data.size());
+        return data;
     }
 };
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cout << "Uzycie: " << argv[0] << " <obraz.jpg/png>\n";
-        return 1;
-    }
-
-    std::string inputFile = argv[1];
-    std::string baseName = removeExtension(inputFile);
-    std::string rleFile = baseName + ".rle";
-    std::string decodedFile = baseName + "_decoded.ppm";
-
+    if (argc < 2) return 1;
     try {
-        Image original = ImageProcessor::loadImage(inputFile);
+        std::string path = argv[1];
+        unsigned int threads = std::thread::hardware_concurrency();
+        if (threads == 0) threads = 4;
 
-        auto start = std::chrono::high_resolution_clock::now();
-        std::vector<byte> compressed = RLECodec::compress(original);
-        auto end = std::chrono::high_resolution_clock::now();
-        
-        ImageProcessor::saveRLE(rleFile, original.width, original.height, compressed);
+        std::cout << "Loading: " << path << "\n";
+        Image input = ImageIO::load(path);
+        Image blurred = input;
 
-        double duration = std::chrono::duration<double, std::milli>(end - start).count();
-        double ratio = (double)compressed.size() / (double)original.pixels.size() * 100.0;
-        
-        std::cout << "\n--- WYNIKI KOMPRESJI ---\n";
-        std::cout << "Czas: " << duration << " ms\n";
-        std::cout << "Ratio: " << ratio << "% (oryginał: " << original.pixels.size()/1024 << "KB -> RLE: " << compressed.size()/1024 << "KB)\n";
+        std::cout << "Image size: " << input.width << "x" << input.height << "\n";
+        std::cout << "Operation: Heavy Blur (Radius " << BLUR_RADIUS << ")\n\n";
 
-        std::cout << "\n--- WERYFIKACJA ---\n";
-        std::cout << "Otwieram plik .rle i dekoduję...\n";
         
+        std::cout << "[1] Running Single Thread (Reference)...\n";
+        auto tStart1 = std::chrono::high_resolution_clock::now();
+        Processor::applyBlur(input, blurred, 1);
+        auto tEnd1 = std::chrono::high_resolution_clock::now();
+        double time1 = std::chrono::duration<double, std::milli>(tEnd1 - tStart1).count();
+        std::cout << "Single Thread Time: " << time1 << " ms\n\n";
+
+        std::cout << "[2] Running Multi Thread (" << threads << " threads)...\n";
+        auto tStart2 = std::chrono::high_resolution_clock::now();
+        Processor::applyBlur(input, blurred, threads);
+        auto tEnd2 = std::chrono::high_resolution_clock::now();
+        double time2 = std::chrono::duration<double, std::milli>(tEnd2 - tStart2).count();
+        std::cout << "Multi Thread Time:  " << time2 << " ms\n";
+
+        std::cout << "--------------------------------\n";
+        std::cout << "SPEEDUP: x" << std::fixed << std::setprecision(2) << (time1 / time2) << "\n";
+        std::cout << "--------------------------------\n\n";
+
+        std::cout << "Compressing RLE...\n";
+        auto compData = RLE::compress(blurred);
+        RLE::saveToFile("output.rle", blurred.width, blurred.height, compData);
+        std::cout << "Saved output.rle (" << compData.size() / 1024 << " KB)\n";
+
+        std::cout << "Decompressing verify...\n";
         int w, h;
-        std::vector<byte> dataFromFile;
-        if (!ImageProcessor::loadRLE(rleFile, w, h, dataFromFile)) {
-            throw std::runtime_error("Nie udalo sie wczytac stworzonego pliku RLE!");
-        }
-
-        Image decoded = RLECodec::decompress(dataFromFile, w, h);
-        ImageProcessor::saveToPPM(decoded, decodedFile);
-
-        std::cout << "SUKCES! Zapisano odzyskany obraz jako: " << decodedFile << "\n";
-        std::cout << "Teraz mozesz otworzyc plik _decoded.ppm i porownac go z oryginalem.\n";
+        auto loadedData = RLE::loadFromFile("output.rle", w, h);
+        Image finalImg = RLE::decompress(loadedData, w, h);
+        
+        ImageIO::save("final_output.png", finalImg);
+        std::cout << "Saved final_output.png. Success.\n";
 
     } catch (const std::exception& e) {
-        std::cerr << "BŁĄD: " << e.what() << "\n";
+        std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
-
     return 0;
 }
