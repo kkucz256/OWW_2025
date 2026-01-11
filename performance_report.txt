@@ -1,0 +1,21 @@
+PERFORMANCE ANALYSIS
+==================================================
+Image: 7092x9925 | Threads: 12 | Radius: 15
+
+CPU Single-Thread        : 60650.53   ms | Baseline
+
+[CPU Multi-Thread Analysis]
+Total Multi-Thread       : 11987.52   ms | Speedup: 5.05x
+  > Thread Spawning      : 0.40       ms | OS Bottleneck
+  > Actual Computing     : 11987.12   ms | Pure logic
+
+[CUDA GPU Analysis]
+Total CUDA Time          : 340.95     ms | Speedup: 177.x
+  > Host to Device       : 21.91      ms | PCIe Bottleneck!
+  > GPU Kernel           : 295.59     ms | Calculation power
+  > Device to Host       : 23.45      ms | Transfer back
+
+[Bonus: RLE Analysis]
+RLE Compression          : 245.50     ms | Single-threaded lag
+
+DIAGNOSIS:
