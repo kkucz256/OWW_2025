@@ -6,27 +6,27 @@
 #include <fstream>
 #include <algorithm>
 #include <iomanip>
+#include <future>
 #include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 using byte = uint8_t;
-const int BLUR_RADIUS = 15; 
+const int BLUR_RADIUS = 15;
 
 struct Pixel {
     byte r, g, b;
-    bool operator==(const Pixel& other) const {
+    __device__ __host__ bool operator==(const Pixel& other) const {
         return r == other.r && g == other.g && b == other.b;
     }
 };
 
 struct Image {
-    int width;
-    int height;
+    int width, height;
     std::vector<Pixel> pixels;
 };
 
@@ -34,83 +34,9 @@ class Timer {
     std::chrono::high_resolution_clock::time_point start;
 public:
     Timer() { start = std::chrono::high_resolution_clock::now(); }
-    double elapsedMs() {
+    double elapsed() {
         auto end = std::chrono::high_resolution_clock::now();
         return std::chrono::duration<double, std::milli>(end - start).count();
-    }
-};
-
-class ImageIO {
-public:
-    static Image load(const std::string& filename) {
-        int w, h, c;
-        unsigned char* data = stbi_load(filename.c_str(), &w, &h, &c, 3);
-        if (!data) throw std::runtime_error("Cannot load image");
-        Image img{w, h};
-        img.pixels.resize(w * h);
-        for (size_t i = 0; i < w * h; ++i) {
-            img.pixels[i] = {data[i * 3], data[i * 3 + 1], data[i * 3 + 2]};
-        }
-        stbi_image_free(data);
-        return img;
-    }
-
-    static void save(const std::string& filename, const Image& img) {
-        std::vector<byte> raw;
-        raw.reserve(img.width * img.height * 3);
-        for (const auto& p : img.pixels) {
-            raw.push_back(p.r);
-            raw.push_back(p.g);
-            raw.push_back(p.b);
-        }
-        stbi_write_png(filename.c_str(), img.width, img.height, 3, raw.data(), img.width * 3);
-    }
-};
-
-class Processor {
-    static void blurRegion(const Image& src, Image& dst, int startY, int endY) {
-        int w = src.width;
-        int h = src.height;
-        for (int y = startY; y < endY; ++y) {
-            for (int x = 0; x < w; ++x) {
-                long r = 0, g = 0, b = 0;
-                int count = 0;
-                for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
-                    for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
-                        int ny = y + ky;
-                        int nx = x + kx;
-                        if (ny < 0) ny = 0;
-                        if (ny >= h) ny = h - 1;
-                        if (nx < 0) nx = 0;
-                        if (nx >= w) nx = w - 1;
-
-                        const Pixel& p = src.pixels[ny * w + nx];
-                        r += p.r; g += p.g; b += p.b;
-                        count++;
-                    }
-                }
-                dst.pixels[y * w + x] = {(byte)(r/count), (byte)(g/count), (byte)(b/count)};
-            }
-        }
-    }
-
-public:
-    static void applyBlur(const Image& src, Image& dst, int threads, double& outSpawn, double& outWork) {
-        dst = src;
-        std::vector<std::thread> pool;
-        int rows = src.height / threads;
-        
-        Timer tSpawn;
-        for (int i = 0; i < threads; ++i) {
-            pool.emplace_back([&, i]() {
-                blurRegion(src, dst, i * rows, (i == threads - 1) ? src.height : (i + 1) * rows);
-            });
-        }
-        outSpawn = tSpawn.elapsedMs();
-
-        Timer tWork;
-        for (auto& t : pool) t.join();
-        outWork = tWork.elapsedMs();
     }
 };
 
@@ -118,162 +44,208 @@ __global__ void blurKernel(const Pixel* src, Pixel* dst, int w, int h) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
-    long r = 0, g = 0, b = 0;
-    int count = 0;
+    long r = 0, g = 0, b = 0; int cnt = 0;
     for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
         for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
-            int ny = max(0, min(h - 1, y + ky));
-            int nx = max(0, min(w - 1, x + kx));
+            int ny = max(0, min(h - 1, y + ky)), nx = max(0, min(w - 1, x + kx));
             const Pixel& p = src[ny * w + nx];
-            r += p.r; g += p.g; b += p.b;
-            count++;
+            r += p.r; g += p.g; b += p.b; cnt++;
         }
     }
-    dst[y * w + x] = {(byte)(r / count), (byte)(g / count), (byte)(b / count)};
+    dst[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
 }
 
-class CudaProcessor {
-public:
-    static void applyBlur(const Image& src, Image& dst, double& outH2D, double& outKernel, double& outD2H) {
-        dst = src; 
-        size_t size = src.width * src.height * sizeof(Pixel);
-        Pixel *d_src, *d_dst;
-        cudaMalloc(&d_src, size);
-        cudaMalloc(&d_dst, size);
-
-        Timer tH2D;
-        cudaMemcpy(d_src, src.pixels.data(), size, cudaMemcpyHostToDevice);
-        outH2D = tH2D.elapsedMs();
-
-        dim3 threadsPerBlock(16, 16);
-        dim3 numBlocks((src.width + 15) / 16, (src.height + 15) / 16);
-
-        Timer tKernel;
-        blurKernel<<<numBlocks, threadsPerBlock>>>(d_src, d_dst, src.width, src.height);
-        cudaDeviceSynchronize();
-        outKernel = tKernel.elapsedMs();
-
-        Timer tD2H;
-        cudaMemcpy(dst.pixels.data(), d_dst, size, cudaMemcpyDeviceToHost);
-        outD2H = tD2H.elapsedMs();
-
-        cudaFree(d_src); cudaFree(d_dst);
+__global__ void rleKernel(const Pixel* src, byte* dst, int* rowSizes, int w, int h) {
+    int y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= h) return;
+    int rowStart = y * w, outIdx = y * (w * 4), current = outIdx, i = 0;
+    while (i < w) {
+        Pixel p = src[rowStart + i]; byte count = 1;
+        while (i + count < w && count < 255 && src[rowStart + i + count] == p) count++;
+        dst[current++] = count; dst[current++] = p.r; dst[current++] = p.g; dst[current++] = p.b;
+        i += count;
     }
+    rowSizes[y] = current - outIdx;
+}
+
+struct DetailedPrep {
+    double alloc_host = 0;
+    double alloc_device = 0;
+    double ctx_init = 0;
 };
 
-class RLE {
-public:
-    static std::vector<byte> compress(const Image& img) {
-        std::vector<byte> out;
-        out.reserve(img.pixels.size() * 2);
-        size_t n = img.pixels.size();
-        size_t i = 0;
-        while (i < n) {
-            Pixel p = img.pixels[i];
-            byte count = 1;
-            while (i + count < n && count < 255 && img.pixels[i + count] == p) count++;
-            out.push_back(count);
-            out.push_back(p.r); out.push_back(p.g); out.push_back(p.b);
-            i += count;
-        }
-        return out;
-    }
-    static Image decompress(const std::vector<byte>& data, int w, int h) {
-        Image img{w, h};
-        img.pixels.reserve(w * h);
-        size_t i = 0;
-        while (i < data.size()) {
-            byte count = data[i++];
-            Pixel p = {data[i++], data[i++], data[i++]};
-            for (int k = 0; k < count; ++k) img.pixels.push_back(p);
-        }
-        return img;
-    }
-    static void saveToFile(const std::string& fname, int w, int h, const std::vector<byte>& data) {
-        std::ofstream f(fname, std::ios::binary);
-        f.write((char*)&w, sizeof(w)); f.write((char*)&h, sizeof(h));
-        f.write((char*)data.data(), data.size());
-    }
-    static std::vector<byte> loadFromFile(const std::string& fname, int& w, int& h) {
-        std::ifstream f(fname, std::ios::binary | std::ios::ate);
-        size_t sz = f.tellg(); f.seekg(0);
-        f.read((char*)&w, sizeof(w)); f.read((char*)&h, sizeof(h));
-        std::vector<byte> data(sz - 8); f.read((char*)data.data(), data.size());
-        return data;
-    }
+struct PipelineResult {
+    DetailedPrep prep_info;
+    double h2d = 0, blur = 0, rle = 0, d2h = 0, total = 0;
 };
 
-void saveFullReport(const std::string& fname, int w, int h, int threads, 
-                    double s_total, double m_spawn, double m_work, 
-                    double c_h2d, double c_kernel, double c_d2h, double rle_time) {
-    std::ofstream r(fname);
-    r << "PERFORMANCE ANALYSIS\n" << std::string(50, '=') << "\n";
-    r << "Image: " << w << "x" << h << " | Threads: " << threads << " | Radius: " << BLUR_RADIUS << "\n\n";
+void saveReport(const std::string& fname, int w, int h, int threads, 
+                double loadT, double saveT,
+                const PipelineResult& st, const PipelineResult& mt, const PipelineResult& cuda) {
+    std::ofstream f(fname);
+    auto line = [&]() { f << std::string(95, '-') << "\n"; };
+    
+    f << "PERFORMANCE COMPARISON REPORT (Extreme Breakdown + Disk I/O)\n";
+    f << "Image: " << w << "x" << h << " | Threads: " << threads << " | Radius: " << BLUR_RADIUS << "\n";
+    line();
 
-    auto printStat = [&](std::string name, double time, std::string note = "") {
-        r << std::left << std::setw(25) << name << ": " << std::fixed << std::setprecision(2) << std::setw(10) << time << " ms | " << note << "\n";
-    };
+    f << "[Disk I/O Latency]\n";
+    f << std::left << std::setw(35) << "  - Image Load (Disk -> RAM):" << loadT << " ms\n";
+    f << std::left << std::setw(35) << "  - Image Save (RAM -> Disk):" << saveT << " ms\n";
+    line();
 
-    printStat("CPU Single-Thread", s_total, "Baseline");
-    r << "\n[CPU Multi-Thread Analysis]\n";
-    double m_total = m_spawn + m_work;
-    printStat("Total Multi-Thread", m_total, "Speedup: " + std::to_string(s_total / m_total).substr(0,4) + "x");
-    printStat("  > Thread Spawning", m_spawn, "OS Bottleneck");
-    printStat("  > Actual Computing", m_work, "Pure logic");
+    f << std::left << std::setw(35) << "STAGE" 
+      << std::setw(20) << "SINGLE (ms)" 
+      << std::setw(20) << "MULTI (ms)" 
+      << "CUDA (ms)\n";
+    line();
 
-    r << "\n[CUDA GPU Analysis]\n";
-    double c_total = c_h2d + c_kernel + c_d2h;
-    printStat("Total CUDA Time", c_total, "Speedup: " + std::to_string(s_total / c_total).substr(0,4) + "x");
-    printStat("  > Host to Device", c_h2d, "PCIe Bottleneck!");
-    printStat("  > GPU Kernel", c_kernel, "Calculation power");
-    printStat("  > Device to Host", c_d2h, "Transfer back");
-
-    r << "\n[Bonus: RLE Analysis]\n";
-    printStat("RLE Compression", rle_time, "Single-threaded lag");
-
-    r << "\nDIAGNOSIS:\n";
-    if (m_spawn > m_work * 0.1) r << "- WARNING: Wątki systemowe tworzą się za długo względem pracy.\n";
-    if (c_h2d + c_d2h > c_kernel) r << "- WARNING: Szyna PCIe zabija zysk z GPU. Algorytm zbyt prosty.\n";
-    if (rle_time > c_total) r << "- WARNING: Kompresja RLE trwa dłużej niż cały blur na GPU!\n";
-
-    r.close();
+    f << "[Preparation Breakdown]\n";
+    f << std::left << std::setw(35) << "  - Host Alloc/Copy" << std::setw(20) << st.prep_info.alloc_host << std::setw(20) << mt.prep_info.alloc_host << cuda.prep_info.alloc_host << "\n";
+    f << std::left << std::setw(35) << "  - Device Alloc" << std::setw(20) << "-" << std::setw(20) << "-" << cuda.prep_info.alloc_device << "\n";
+    f << std::left << std::setw(35) << "  - Context/Sync Init" << std::setw(20) << "-" << std::setw(20) << "-" << cuda.prep_info.ctx_init << "\n";
+    line();
+    f << std::left << std::setw(35) << "H2D Transfer" << std::setw(20) << "-" << std::setw(20) << "-" << cuda.h2d << "\n";
+    f << std::left << std::setw(35) << "Blur Computation" << std::setw(20) << st.blur << std::setw(20) << mt.blur << cuda.blur << "\n";
+    f << std::left << std::setw(35) << "RLE Computation" << std::setw(20) << st.rle << std::setw(20) << mt.rle << cuda.rle << "\n";
+    f << std::left << std::setw(35) << "D2H Transfer" << std::setw(20) << "-" << std::setw(20) << "-" << cuda.d2h << "\n";
+    line();
+    f << std::left << std::setw(35) << "TOTAL PIPELINE" << std::setw(20) << st.total << std::setw(20) << mt.total << cuda.total << "\n";
+    f.close();
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) return 1;
-    try {
-        std::string path = argv[1];
-        unsigned int threads = std::thread::hardware_concurrency();
-        Image input = ImageIO::load(path);
-        Image blurred = input;
+    if (argc < 2) { std::cout << "Gdzie sciezka pliku?\n"; return 1; }
+    
+    int w, h, c;
+    std::cout << "Loading image from disk...\n";
+    Timer tLoad;
+    unsigned char* raw_data = stbi_load(argv[1], &w, &h, &c, 3);
+    if (!raw_data) return 1;
+    double loadTime = tLoad.elapsed();
 
-        double s_spawn, s_work, m_spawn, m_work, c_h2d, c_kernel, c_d2h, rle_time;
+    Image img{ w, h }; img.pixels.assign((Pixel*)raw_data, (Pixel*)raw_data + w * h);
+    stbi_image_free(raw_data);
 
-        std::cout << "[1] CPU Single...\n";
-        Processor::applyBlur(input, blurred, 1, s_spawn, s_work);
-        double s_total = s_work;
+    int threads = std::thread::hardware_concurrency();
+    PipelineResult resST, resMT, resCUDA;
+    volatile size_t prevent_opt;
 
-        std::cout << "[2] CPU Multi...\n";
-        Processor::applyBlur(input, blurred, threads, m_spawn, m_work);
+    {
+        std::cout << "Executing Single Thread...\n";
+        Timer tP; Image blurred = img; resST.prep_info.alloc_host = tP.elapsed();
+        Timer tB;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                long r = 0, g = 0, b = 0; int cnt = 0;
+                for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
+                    for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
+                        int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
+                        const Pixel& p = img.pixels[ny * w + nx];
+                        r += p.r; g += p.g; b += p.b; cnt++;
+                    }
+                }
+                blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
+            }
+        }
+        resST.blur = tB.elapsed();
+        Timer tR;
+        size_t s = 0;
+        for (size_t i = 0; i < blurred.pixels.size(); ) {
+            Pixel p = blurred.pixels[i]; byte count = 1;
+            while (i + count < blurred.pixels.size() && count < 255 && blurred.pixels[i + count] == p) count++;
+            s += 4; i += count;
+        }
+        prevent_opt = s; resST.rle = tR.elapsed();
+        resST.total = resST.prep_info.alloc_host + resST.blur + resST.rle;
+    }
 
-        std::cout << "[3] CUDA...\n";
-        CudaProcessor::applyBlur(input, blurred, c_h2d, c_kernel, c_d2h);
+    {
+        std::cout << "Executing Multi Thread...\n";
+        Timer tP; Image blurred = img; resMT.prep_info.alloc_host = tP.elapsed();
+        Timer tB;
+        std::vector<std::thread> pool;
+        for (int i = 0; i < threads; ++i) {
+            pool.emplace_back([&, i, threads, h, w]() {
+                int rows = h / threads, sY = i * rows, eY = (i == threads - 1) ? h : (i + 1) * rows;
+                for (int y = sY; y < eY; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        long r = 0, g = 0, b = 0; int cnt = 0;
+                        for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
+                            for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
+                                int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
+                                const Pixel& p = img.pixels[ny * w + nx];
+                                r += p.r; g += p.g; b += p.b; cnt++;
+                            }
+                        }
+                        blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
+                    }
+                }
+            });
+        }
+        for (auto& t : pool) t.join();
+        resMT.blur = tB.elapsed();
 
-        std::cout << "[4] RLE...\n";
-        Timer tRle;
-        auto compData = RLE::compress(blurred);
-        rle_time = tRle.elapsedMs();
-        RLE::saveToFile("output.rle", blurred.width, blurred.height, compData);
+        Timer tR;
+        std::vector<std::future<size_t>> futs;
+        int chunk = blurred.pixels.size() / threads;
+        for (int i = 0; i < threads; ++i) {
+            int start = i * chunk, end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
+            futs.push_back(std::async(std::launch::async, [=, &blurred]() {
+                size_t s = 0;
+                for (int j = start; j < end; ) {
+                    Pixel p = blurred.pixels[j]; byte c = 1;
+                    while (j + c < end && c < 255 && blurred.pixels[j + c] == p) c++;
+                    s += 4; j += c;
+                }
+                return s;
+            }));
+        }
+        for (auto& f : futs) prevent_opt = f.get();
+        resMT.rle = tR.elapsed();
+        resMT.total = resMT.prep_info.alloc_host + resMT.blur + resMT.rle;
+    }
 
-        std::cout << "Saving report...\n";
-        saveFullReport("performance_report.txt", input.width, input.height, threads, s_total, m_spawn, m_work, c_h2d, c_kernel, c_d2h, rle_time);
+    Image finalGpuImg = img;
+    {
+        std::cout << "Executing CUDA...\n";
+        Timer tCtx; cudaDeviceSynchronize(); resCUDA.prep_info.ctx_init = tCtx.elapsed();
+        Timer tAllocH; Image blurred = img; resCUDA.prep_info.alloc_host = tAllocH.elapsed();
 
-        int w, h;
-        auto loadedData = RLE::loadFromFile("output.rle", w, h);
-        Image finalImg = RLE::decompress(loadedData, w, h);
-        ImageIO::save("final_output.png", finalImg);
-        std::cout << "Success.\n";
+        Timer tAllocD;
+        Pixel *d_s, *d_d; byte* d_r; int* d_sz;
+        size_t sz = w * h * sizeof(Pixel);
+        cudaMalloc(&d_s, sz); cudaMalloc(&d_d, sz);
+        cudaMalloc(&d_r, sz * 4); cudaMalloc(&d_sz, h * sizeof(int));
+        resCUDA.prep_info.alloc_device = tAllocD.elapsed();
 
-    } catch (const std::exception& e) { std::cerr << "Error: " << e.what() << "\n"; return 1; }
+        Timer tH2D; cudaMemcpy(d_s, img.pixels.data(), sz, cudaMemcpyHostToDevice); resCUDA.h2d = tH2D.elapsed();
+
+        Timer tB;
+        dim3 block(16, 16); dim3 grid((w+15)/16, (h+15)/16);
+        blurKernel<<<grid, block>>>(d_s, d_d, w, h);
+        cudaDeviceSynchronize();
+        resCUDA.blur = tB.elapsed();
+
+        Timer tR;
+        rleKernel<<<(h+255)/256, 256>>>(d_d, d_r, d_sz, w, h);
+        cudaDeviceSynchronize();
+        resCUDA.rle = tR.elapsed();
+
+        Timer tD2H;
+        cudaMemcpy(finalGpuImg.pixels.data(), d_d, sz, cudaMemcpyDeviceToHost);
+        resCUDA.d2h = tD2H.elapsed();
+
+        resCUDA.total = resCUDA.prep_info.ctx_init + resCUDA.prep_info.alloc_host + resCUDA.prep_info.alloc_device + resCUDA.h2d + resCUDA.blur + resCUDA.rle + resCUDA.d2h;
+        cudaFree(d_s); cudaFree(d_d); cudaFree(d_r); cudaFree(d_sz);
+    }
+
+    std::cout << "Saving final image...\n";
+    Timer tSave;
+    stbi_write_png("final_result.png", w, h, 3, finalGpuImg.pixels.data(), w * 3);
+    double saveTime = tSave.elapsed();
+
+    saveReport("performance_full_breakdown.txt", w, h, threads, loadTime, saveTime, resST, resMT, resCUDA);
+    std::cout << "Done. Size flag: " << prevent_opt << "\n";
     return 0;
 }
