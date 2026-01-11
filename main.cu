@@ -161,6 +161,7 @@ int main(int argc, char* argv[]) {
     {
         std::cout << "Executing Multi Thread...\n";
         Timer tP; Image blurred = img; resMT.prep_info.alloc_host = tP.elapsed();
+        
         Timer tB;
         std::vector<std::thread> pool;
         for (int i = 0; i < threads; ++i) {
@@ -187,42 +188,35 @@ int main(int argc, char* argv[]) {
         Timer tR;
         std::vector<std::thread> rleThreads;
         std::vector<size_t> partialResults(threads, 0);
-
-        int chunk = blurred.pixels.size() / threads;
+        int chunk = (int)blurred.pixels.size() / threads;
         for (int i = 0; i < threads; ++i) {
             int start = i * chunk;
             int end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
-
             rleThreads.emplace_back([=, &blurred, &partialResults]() {
                 size_t s = 0;
                 for (int j = start; j < end; ) {
-                    Pixel p = blurred.pixels[j]; 
-                    byte c = 1;
+                    Pixel p = blurred.pixels[j]; byte c = 1;
                     while (j + c < end && c < 255 && blurred.pixels[j + c] == p) c++;
-                    s += 4; 
-                    j += c;
+                    s += 4; j += c;
                 }
                 partialResults[i] = s;
             });
         }
-
-        for (auto& t : rleThreads) {
-            t.join();
-        }
-
+        for (auto& t : rleThreads) t.join();
         size_t total_s = 0;
-        for (size_t val : partialResults) {
-            total_s += val;
-        }
+        for (size_t val : partialResults) total_s += val;
         prevent_opt = total_s; 
         resMT.rle = tR.elapsed();
+
+        resMT.total = resMT.prep_info.alloc_host + resMT.blur + resMT.rle;
     }
 
     Image finalGpuImg = img;
     {
         std::cout << "Executing CUDA...\n";
         Timer tCtx; cudaDeviceSynchronize(); resCUDA.prep_info.ctx_init = tCtx.elapsed();
-        Timer tAllocH; Image blurred = img; resCUDA.prep_info.alloc_host = tAllocH.elapsed();
+        Timer tAllocH;
+        Image blurred = img; resCUDA.prep_info.alloc_host = tAllocH.elapsed();
 
         Timer tAllocD;
         Pixel *d_s, *d_d; byte* d_r; int* d_sz;

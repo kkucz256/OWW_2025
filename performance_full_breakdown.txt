@@ -2,19 +2,19 @@ PERFORMANCE COMPARISON REPORT (Extreme Breakdown + Disk I/O)
 Image: 7092x9925 | Threads: 12 | Radius: 15
 -----------------------------------------------------------------------------------------------
 [Disk I/O Latency]
-  - Image Load (Disk -> RAM):      378.392 ms
-  - Image Save (RAM -> Disk):      4385.51 ms
+  - Image Load (Disk -> RAM):      383.039 ms
+  - Image Save (RAM -> Disk):      4073.14 ms
 -----------------------------------------------------------------------------------------------
 STAGE                              SINGLE (ms)         MULTI (ms)          CUDA (ms)
 -----------------------------------------------------------------------------------------------
 [Preparation Breakdown]
-  - Host Alloc/Copy                116.852             115.926             115.339
-  - Device Alloc                   -                   -                   0.43095
-  - Context/Sync Init              -                   -                   179.253
+  - Host Alloc/Copy                100.851             97.1055             94.4124
+  - Device Alloc                   -                   -                   0.432703
+  - Context/Sync Init              -                   -                   358.702
 -----------------------------------------------------------------------------------------------
-H2D Transfer                       -                   -                   27.7212
-Blur Computation                   76359               16419.5             273.454
-RLE Computation                    134.232             26.3985             14.3364
-D2H Transfer                       -                   -                   25.0971
+H2D Transfer                       -                   -                   16.4647
+Blur Computation                   73152.1             13153.8             295.399
+RLE Computation                    131.191             22.1547             16.4123
+D2H Transfer                       -                   -                   16.5386
 -----------------------------------------------------------------------------------------------
-TOTAL PIPELINE                     76610.1             0                   635.632
+TOTAL PIPELINE                     73384.1             13273.1             798.362
