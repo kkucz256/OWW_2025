@@ -6,9 +6,7 @@
 #include <fstream>
 #include <algorithm>
 #include <iomanip>
-#include <future>
 #include <cuda_runtime.h>
-#include <device_launch_parameters.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -187,23 +185,37 @@ int main(int argc, char* argv[]) {
         resMT.blur = tB.elapsed();
 
         Timer tR;
-        std::vector<std::future<size_t>> futs;
+        std::vector<std::thread> rleThreads;
+        std::vector<size_t> partialResults(threads, 0);
+
         int chunk = blurred.pixels.size() / threads;
         for (int i = 0; i < threads; ++i) {
-            int start = i * chunk, end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
-            futs.push_back(std::async(std::launch::async, [=, &blurred]() {
+            int start = i * chunk;
+            int end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
+
+            rleThreads.emplace_back([=, &blurred, &partialResults]() {
                 size_t s = 0;
                 for (int j = start; j < end; ) {
-                    Pixel p = blurred.pixels[j]; byte c = 1;
+                    Pixel p = blurred.pixels[j]; 
+                    byte c = 1;
                     while (j + c < end && c < 255 && blurred.pixels[j + c] == p) c++;
-                    s += 4; j += c;
+                    s += 4; 
+                    j += c;
                 }
-                return s;
-            }));
+                partialResults[i] = s;
+            });
         }
-        for (auto& f : futs) prevent_opt = f.get();
+
+        for (auto& t : rleThreads) {
+            t.join();
+        }
+
+        size_t total_s = 0;
+        for (size_t val : partialResults) {
+            total_s += val;
+        }
+        prevent_opt = total_s; 
         resMT.rle = tR.elapsed();
-        resMT.total = resMT.prep_info.alloc_host + resMT.blur + resMT.rle;
     }
 
     Image finalGpuImg = img;
