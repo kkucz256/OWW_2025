@@ -14,7 +14,7 @@
 #include "stb_image_write.h"
 
 using byte = uint8_t;
-const int BLUR_RADIUS = 15;
+const int BLUR_RADIUS = 32;
 
 struct Pixel {
     byte r, g, b;
@@ -129,87 +129,87 @@ int main(int argc, char* argv[]) {
     PipelineResult resST, resMT, resCUDA;
     volatile size_t prevent_opt;
 
-    {
-        std::cout << "Executing Single Thread...\n";
-        Timer tP; Image blurred = img; resST.prep_info.alloc_host = tP.elapsed();
-        Timer tB;
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                long r = 0, g = 0, b = 0; int cnt = 0;
-                for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
-                    for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
-                        int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
-                        const Pixel& p = img.pixels[ny * w + nx];
-                        r += p.r; g += p.g; b += p.b; cnt++;
-                    }
-                }
-                blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
-            }
-        }
-        resST.blur = tB.elapsed();
-        Timer tR;
-        size_t s = 0;
-        for (size_t i = 0; i < blurred.pixels.size(); ) {
-            Pixel p = blurred.pixels[i]; byte count = 1;
-            while (i + count < blurred.pixels.size() && count < 255 && blurred.pixels[i + count] == p) count++;
-            s += 4; i += count;
-        }
-        prevent_opt = s; resST.rle = tR.elapsed();
-        resST.total = resST.prep_info.alloc_host + resST.blur + resST.rle;
-    }
+    // {
+    //     std::cout << "Executing Single Thread...\n";
+    //     Timer tP; Image blurred = img; resST.prep_info.alloc_host = tP.elapsed();
+    //     Timer tB;
+    //     for (int y = 0; y < h; ++y) {
+    //         for (int x = 0; x < w; ++x) {
+    //             long r = 0, g = 0, b = 0; int cnt = 0;
+    //             for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
+    //                 for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
+    //                     int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
+    //                     const Pixel& p = img.pixels[ny * w + nx];
+    //                     r += p.r; g += p.g; b += p.b; cnt++;
+    //                 }
+    //             }
+    //             blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
+    //         }
+    //     }
+    //     resST.blur = tB.elapsed();
+    //     Timer tR;
+    //     size_t s = 0;
+    //     for (size_t i = 0; i < blurred.pixels.size(); ) {
+    //         Pixel p = blurred.pixels[i]; byte count = 1;
+    //         while (i + count < blurred.pixels.size() && count < 255 && blurred.pixels[i + count] == p) count++;
+    //         s += 4; i += count;
+    //     }
+    //     prevent_opt = s; resST.rle = tR.elapsed();
+    //     resST.total = resST.prep_info.alloc_host + resST.blur + resST.rle;
+    // }
 
-    {
-        std::cout << "Executing Multi Thread...\n";
-        Timer tP; Image blurred = img; resMT.prep_info.alloc_host = tP.elapsed();
+    // {
+    //     std::cout << "Executing Multi Thread...\n";
+    //     Timer tP; Image blurred = img; resMT.prep_info.alloc_host = tP.elapsed();
         
-        Timer tB;
-        std::vector<std::thread> pool;
-        for (int i = 0; i < threads; ++i) {
-            pool.emplace_back([&, i, threads, h, w]() {
-                int rows = h / threads, sY = i * rows, eY = (i == threads - 1) ? h : (i + 1) * rows;
-                for (int y = sY; y < eY; ++y) {
-                    for (int x = 0; x < w; ++x) {
-                        long r = 0, g = 0, b = 0; int cnt = 0;
-                        for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
-                            for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
-                                int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
-                                const Pixel& p = img.pixels[ny * w + nx];
-                                r += p.r; g += p.g; b += p.b; cnt++;
-                            }
-                        }
-                        blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
-                    }
-                }
-            });
-        }
-        for (auto& t : pool) t.join();
-        resMT.blur = tB.elapsed();
+    //     Timer tB;
+    //     std::vector<std::thread> pool;
+    //     for (int i = 0; i < threads; ++i) {
+    //         pool.emplace_back([&, i, threads, h, w]() {
+    //             int rows = h / threads, sY = i * rows, eY = (i == threads - 1) ? h : (i + 1) * rows;
+    //             for (int y = sY; y < eY; ++y) {
+    //                 for (int x = 0; x < w; ++x) {
+    //                     long r = 0, g = 0, b = 0; int cnt = 0;
+    //                     for (int ky = -BLUR_RADIUS; ky <= BLUR_RADIUS; ++ky) {
+    //                         for (int kx = -BLUR_RADIUS; kx <= BLUR_RADIUS; ++kx) {
+    //                             int ny = std::max(0, std::min(h - 1, y + ky)), nx = std::max(0, std::min(w - 1, x + kx));
+    //                             const Pixel& p = img.pixels[ny * w + nx];
+    //                             r += p.r; g += p.g; b += p.b; cnt++;
+    //                         }
+    //                     }
+    //                     blurred.pixels[y * w + x] = { (byte)(r/cnt), (byte)(g/cnt), (byte)(b/cnt) };
+    //                 }
+    //             }
+    //         });
+    //     }
+    //     for (auto& t : pool) t.join();
+    //     resMT.blur = tB.elapsed();
 
-        Timer tR;
-        std::vector<std::thread> rleThreads;
-        std::vector<size_t> partialResults(threads, 0);
-        int chunk = (int)blurred.pixels.size() / threads;
-        for (int i = 0; i < threads; ++i) {
-            int start = i * chunk;
-            int end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
-            rleThreads.emplace_back([=, &blurred, &partialResults]() {
-                size_t s = 0;
-                for (int j = start; j < end; ) {
-                    Pixel p = blurred.pixels[j]; byte c = 1;
-                    while (j + c < end && c < 255 && blurred.pixels[j + c] == p) c++;
-                    s += 4; j += c;
-                }
-                partialResults[i] = s;
-            });
-        }
-        for (auto& t : rleThreads) t.join();
-        size_t total_s = 0;
-        for (size_t val : partialResults) total_s += val;
-        prevent_opt = total_s; 
-        resMT.rle = tR.elapsed();
+    //     Timer tR;
+    //     std::vector<std::thread> rleThreads;
+    //     std::vector<size_t> partialResults(threads, 0);
+    //     int chunk = (int)blurred.pixels.size() / threads;
+    //     for (int i = 0; i < threads; ++i) {
+    //         int start = i * chunk;
+    //         int end = (i == threads - 1) ? (int)blurred.pixels.size() : (i + 1) * chunk;
+    //         rleThreads.emplace_back([=, &blurred, &partialResults]() {
+    //             size_t s = 0;
+    //             for (int j = start; j < end; ) {
+    //                 Pixel p = blurred.pixels[j]; byte c = 1;
+    //                 while (j + c < end && c < 255 && blurred.pixels[j + c] == p) c++;
+    //                 s += 4; j += c;
+    //             }
+    //             partialResults[i] = s;
+    //         });
+    //     }
+    //     for (auto& t : rleThreads) t.join();
+    //     size_t total_s = 0;
+    //     for (size_t val : partialResults) total_s += val;
+    //     prevent_opt = total_s; 
+    //     resMT.rle = tR.elapsed();
 
-        resMT.total = resMT.prep_info.alloc_host + resMT.blur + resMT.rle;
-    }
+    //     resMT.total = resMT.prep_info.alloc_host + resMT.blur + resMT.rle;
+    // }
 
     Image finalGpuImg = img;
     {
@@ -226,12 +226,22 @@ int main(int argc, char* argv[]) {
         resCUDA.prep_info.alloc_device = tAllocD.elapsed();
 
         Timer tH2D; cudaMemcpy(d_s, img.pixels.data(), sz, cudaMemcpyHostToDevice); resCUDA.h2d = tH2D.elapsed();
+        const int BLOCK = 8;
+        dim3 block(BLOCK, BLOCK);
+        dim3 grid((w + BLOCK - 1) / BLOCK, (h + BLOCK - 1) / BLOCK);
 
-        Timer tB;
-        dim3 block(16, 16); dim3 grid((w+15)/16, (h+15)/16);
         blurKernel<<<grid, block>>>(d_s, d_d, w, h);
         cudaDeviceSynchronize();
-        resCUDA.blur = tB.elapsed();
+
+        const int ITERS = 200;
+
+        Timer tB;
+        for (int i = 0; i < ITERS; i++) {
+            blurKernel<<<grid, block>>>(d_s, d_d, w, h);
+        }
+        cudaDeviceSynchronize();
+
+        resCUDA.blur = tB.elapsed() / ITERS;
 
         Timer tR;
         rleKernel<<<(h+255)/256, 256>>>(d_d, d_r, d_sz, w, h);
@@ -245,6 +255,8 @@ int main(int argc, char* argv[]) {
         resCUDA.total = resCUDA.prep_info.ctx_init + resCUDA.prep_info.alloc_host + resCUDA.prep_info.alloc_device + resCUDA.h2d + resCUDA.blur + resCUDA.rle + resCUDA.d2h;
         cudaFree(d_s); cudaFree(d_d); cudaFree(d_r); cudaFree(d_sz);
     }
+
+
 
     std::cout << "Saving final image...\n";
     Timer tSave;
