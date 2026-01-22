@@ -1,20 +1,17 @@
-PERFORMANCE COMPARISON REPORT (Extreme Breakdown + Disk I/O)
+PERFORMANCE COMPARISON REPORT
 Image: 6352x4480 | Threads: 16 | Radius: 32
 -----------------------------------------------------------------------------------------------
-[Disk I/O Latency]
-  - Image Load (Disk -> RAM):      190.227 ms
-  - Image Save (RAM -> Disk):      1621.14 ms
+[Disk I/O]
+Load: 200.142 ms
+Save: 1690.18 ms
 -----------------------------------------------------------------------------------------------
-STAGE                              SINGLE (ms)         MULTI (ms)          CUDA (ms)
+                              STAGE              SINGLE               MULTICUDA
 -----------------------------------------------------------------------------------------------
-[Preparation Breakdown]
-  - Host Alloc/Copy                0                   0                   71.3297
-  - Device Alloc                   -                   -                   3.88955
-  - Context/Sync Init              -                   -                   263.394
+                               Blur                   0                   0384.34
+                                RLE                   0                   021.2371
 -----------------------------------------------------------------------------------------------
-H2D Transfer                       -                   -                   17.4404
-Blur Computation                   0                   0                   289.503
-RLE Computation                    0                   0                   11.0649
-D2H Transfer                       -                   -                   12.4239
+                              TOTAL                   0                   00
 -----------------------------------------------------------------------------------------------
-TOTAL PIPELINE                     0                   0                   669.046
+[CUDA KERNEL STATS]
+Blur kernel: regs=56 shared=0 local=0
+RLE kernel:  regs=20 shared=0 local=0
