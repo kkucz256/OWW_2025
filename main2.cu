@@ -1,4 +1,3 @@
-// TO JEST TEN STARY MAIN Z WSTĘPNEJ IMPLEMENTACJI JAK COŚ
 #include <iostream>
 #include <vector>
 #include <string>
