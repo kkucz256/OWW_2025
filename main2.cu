@@ -1,3 +1,4 @@
+// TO JEST TEN STARY MAIN Z WSTĘPNEJ IMPLEMENTACJI JAK COŚ
 #include <iostream>
 #include <vector>
 #include <string>
@@ -211,55 +212,55 @@ int main(int argc, char* argv[]) {
     int threads = std::thread::hardware_concurrency();
     PipelineResult st, mt, cu;
 
-    // {
-    //     Timer t; Image out = img;
-    //     st.prep.alloc_host = t.elapsed();
+    {
+        Timer t; Image out = img;
+        st.prep.alloc_host = t.elapsed();
 
-    //     Timer tb;
-    //     for (int y = 0; y < h; y++)
-    //         for (int x = 0; x < w; x++) {
-    //             long r=0,g=0,b=0; int c=0;
-    //             for (int ky=-BLUR_RADIUS; ky<=BLUR_RADIUS; ky++)
-    //                 for (int kx=-BLUR_RADIUS; kx<=BLUR_RADIUS; kx++) {
-    //                     int ny = clampi(y+ky,0,h-1);
-    //                     int nx = clampi(x+kx,0,w-1);
-    //                     Pixel& p = img.pixels[ny*w+nx];
-    //                     r+=p.r; g+=p.g; b+=p.b; c++;
-    //                 }
-    //             out.pixels[y*w+x] = {(byte)(r/c),(byte)(g/c),(byte)(b/c)};
-    //         }
-    //     st.blur = tb.elapsed();
-    //     st.total = st.prep.alloc_host + st.blur;
-    // }
+        Timer tb;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                long r=0,g=0,b=0; int c=0;
+                for (int ky=-BLUR_RADIUS; ky<=BLUR_RADIUS; ky++)
+                    for (int kx=-BLUR_RADIUS; kx<=BLUR_RADIUS; kx++) {
+                        int ny = clampi(y+ky,0,h-1);
+                        int nx = clampi(x+kx,0,w-1);
+                        Pixel& p = img.pixels[ny*w+nx];
+                        r+=p.r; g+=p.g; b+=p.b; c++;
+                    }
+                out.pixels[y*w+x] = {(byte)(r/c),(byte)(g/c),(byte)(b/c)};
+            }
+        st.blur = tb.elapsed();
+        st.total = st.prep.alloc_host + st.blur;
+    }
 
-    // {
-    //     Timer t; Image out = img;
-    //     mt.prep.alloc_host = t.elapsed();
+    {
+        Timer t; Image out = img;
+        mt.prep.alloc_host = t.elapsed();
 
-    //     Timer tb;
-    //     std::vector<std::thread> pool;
-    //     for (int i=0;i<threads;i++) {
-    //         pool.emplace_back([&,i]{
-    //             int y0 = h*i/threads;
-    //             int y1 = h*(i+1)/threads;
-    //             for (int y=y0;y<y1;y++)
-    //                 for (int x=0;x<w;x++) {
-    //                     long r=0,g=0,b=0; int c=0;
-    //                     for (int ky=-BLUR_RADIUS;ky<=BLUR_RADIUS;ky++)
-    //                         for (int kx=-BLUR_RADIUS;kx<=BLUR_RADIUS;kx++) {
-    //                             int ny=clampi(y+ky,0,h-1);
-    //                             int nx=clampi(x+kx,0,w-1);
-    //                             Pixel& p=img.pixels[ny*w+nx];
-    //                             r+=p.r; g+=p.g; b+=p.b; c++;
-    //                         }
-    //                     out.pixels[y*w+x]={(byte)(r/c),(byte)(g/c),(byte)(b/c)};
-    //                 }
-    //         });
-    //     }
-    //     for (auto& t : pool) t.join();
-    //     mt.blur = tb.elapsed();
-    //     mt.total = mt.prep.alloc_host + mt.blur;
-    // }
+        Timer tb;
+        std::vector<std::thread> pool;
+        for (int i=0;i<threads;i++) {
+            pool.emplace_back([&,i]{
+                int y0 = h*i/threads;
+                int y1 = h*(i+1)/threads;
+                for (int y=y0;y<y1;y++)
+                    for (int x=0;x<w;x++) {
+                        long r=0,g=0,b=0; int c=0;
+                        for (int ky=-BLUR_RADIUS;ky<=BLUR_RADIUS;ky++)
+                            for (int kx=-BLUR_RADIUS;kx<=BLUR_RADIUS;kx++) {
+                                int ny=clampi(y+ky,0,h-1);
+                                int nx=clampi(x+kx,0,w-1);
+                                Pixel& p=img.pixels[ny*w+nx];
+                                r+=p.r; g+=p.g; b+=p.b; c++;
+                            }
+                        out.pixels[y*w+x]={(byte)(r/c),(byte)(g/c),(byte)(b/c)};
+                    }
+            });
+        }
+        for (auto& t : pool) t.join();
+        mt.blur = tb.elapsed();
+        mt.total = mt.prep.alloc_host + mt.blur;
+    }
 
     Image gpuOut = img;
     {
